@@ -41,11 +41,31 @@ DEFAULT_WEIGHTS_PATH = Path(__file__).resolve().parent / "models" / "final_model
 
 
 def parse_args():
+    # Accepts BOTH the required positional form (python run.py <input-dir> <output-dir>) AND
+    # the --input_dir/--output_dir flag form used elsewhere in this project's other scripts --
+    # deliberately, not by oversight: the two official instruction sources for this competition
+    # disagree on which style is required, and a real test run showed this is an easy mistake to
+    # make even when you already know the right answer. Supporting both costs nothing and removes
+    # a real failure mode instead of just documenting around it.
     parser = argparse.ArgumentParser(description="KLA restoration inference.")
-    parser.add_argument("input_dir", type=str, help="Directory containing degraded .npy files.")
-    parser.add_argument("output_dir", type=str, help="Directory to write restored .npy files to.")
-    parser.add_argument("--batch_size", type=int, default=8, help="Optional; does not change the required positional usage.")
-    return parser.parse_args()
+    parser.add_argument("input_dir_positional", nargs="?", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("output_dir_positional", nargs="?", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--input_dir", type=str, default=None, help="Directory containing degraded .npy files.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Directory to write restored .npy files to.")
+    parser.add_argument("--batch_size", type=int, default=8)
+    args = parser.parse_args()
+
+    input_dir = args.input_dir or args.input_dir_positional
+    output_dir = args.output_dir or args.output_dir_positional
+    if input_dir is None or output_dir is None:
+        parser.error(
+            "input and output directories are required, either positionally "
+            "(python run.py <input-dir> <output-dir>) or as flags "
+            "(python run.py --input_dir <input-dir> --output_dir <output-dir>)."
+        )
+    args.input_dir = input_dir
+    args.output_dir = output_dir
+    return args
 
 
 def resolve_device():
@@ -116,6 +136,15 @@ def main():
     args = parse_args()
     device = resolve_device()
     print(f"[run] device={device}" + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
+    if device == "cpu":
+        print(
+            "[run] WARNING: no CUDA GPU detected -- running on CPU, which will be significantly "
+            "slower. If this machine has an NVIDIA GPU, this usually means the CPU-only build of "
+            "PyTorch was installed (the default from `pip install -r requirements.txt`). See "
+            "README.md's Setup section for the CUDA-specific install command. This is not an "
+            "error and the run will complete correctly either way, but throughput will not "
+            "reflect GPU performance."
+        )
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)

@@ -31,6 +31,29 @@ No internet access is required at run time -- both dependencies are installed on
 the model weights are already included in `models/final_model.pth`. No API keys, no additional
 downloads, no user interaction, no manual configuration.
 
+**Important -- GPU users read this before running anything.** The command above installs the
+**CPU-only** build of PyTorch by default; the CUDA-enabled build only comes from PyTorch's own
+package index, not the default one used by `pip install -r requirements.txt`. `run.py` will
+still run correctly on CPU (it falls back automatically, no error, no crash), but silently --
+which means a machine with a perfectly good GPU can end up scored on much slower CPU throughput
+with no indication anything is wrong. To get the GPU build:
+
+```bash
+pip uninstall torch -y
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126
+```
+
+Replace `cu126` with whatever matches the target machine's actual CUDA version -- check
+https://pytorch.org/get-started/locally/ for the correct index URL if it's not CUDA 12.6.
+
+**Then verify it actually worked**, rather than assuming:
+```bash
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+```
+This must print `True` before running `run.py` for real, if a GPU is expected to be used. If it
+prints `False` on a machine that does have an NVIDIA GPU, the CUDA-matched install above did not
+succeed -- re-check the CUDA version selected against the actual driver on that machine.
+
 ## Run
 
 ```bash
