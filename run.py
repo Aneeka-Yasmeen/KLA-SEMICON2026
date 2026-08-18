@@ -1,28 +1,12 @@
 """
-KLA restoration -- required submission entry point.
+KLA restoration -- submission entry point.
 
-Usage (exactly as specified in the final-submission-check requirements):
+Usage:
     python run.py <input-dir> <output-dir>
 
 Reads every .npy file in <input-dir>, restores it, and writes one .npy file per input to
-<output-dir> under the same filename. No internet access, API keys, additional model downloads,
-user interaction, or manual configuration are required -- the model architecture and weights are
-loaded entirely from the local models/ folder next to this script.
-
-Guarantees, each satisfied deliberately, not by accident:
-    - Reads all .npy files from the input directory.
-    - Creates the output directory if it does not already exist.
-    - Generates exactly one output .npy per input .npy, same filename.
-    - Every output is a single-channel grayscale array, shape (H, W).
-    - Every output value is clipped to [0,1] and contains no NaN or Inf (checked explicitly,
-      not assumed -- see the final sanitization pass below).
-    - Output resolution is exactly 2x the input resolution (this model's fixed, officially
-      specified scale factor).
-    - Runs on an NVIDIA GPU automatically when available, falls back to CPU otherwise.
-
-One bad input file (corrupted, unreadable, containing NaN/Inf, or too large for available GPU
-memory) does not crash the run or silently drop other files -- it is logged and skipped, and a
-summary at the end reports exactly what happened to every file.
+<output-dir> under the same filename. No internet access, API keys, or manual configuration
+required -- the architecture and weights are loaded from the local models/ folder.
 """
 
 import argparse
@@ -35,18 +19,67 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from models.restoration_net import build_model_from_config
-from models.io_utils import infer_hw_from_shape, load_npy_grayscale, sanitize_finite
 
 DEFAULT_WEIGHTS_PATH = Path(__file__).resolve().parent / "models" / "final_model.pth"
 
 
+def infer_hw_from_shape(shape):
+    """Returns the (H, W) a 2D/3D array shape will have after grayscale conversion."""
+    if len(shape) == 2:
+        return shape
+    if len(shape) == 3:
+        if shape[-1] in (1, 3, 4) and shape[0] not in (1, 3, 4):
+            return shape[0], shape[1]  # (H, W, C)
+        if shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+            return shape[1], shape[2]  # (C, H, W)
+        if shape[-1] in (1, 3, 4):
+            return shape[0], shape[1]
+    raise ValueError(f"unsupported array shape {shape}: expected 2D grayscale or 3D with a channel axis in {{1,3,4}}")
+
+
+def _to_grayscale_3d(arr):
+    """Converts a 3D array to 2D grayscale via luminance weights. Handles channel-last and channel-first."""
+    if arr.shape[-1] in (1, 3, 4) and arr.shape[0] not in (1, 3, 4):
+        channel_last = arr
+    elif arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+        channel_last = np.moveaxis(arr, 0, -1)
+    elif arr.shape[-1] in (1, 3, 4):
+        channel_last = arr
+    else:
+        raise ValueError(
+            f"unsupported 3D array shape {arr.shape}: no axis of size 1, 3, or 4 to treat as channels"
+        )
+    if channel_last.shape[-1] == 1:
+        return channel_last[..., 0]
+    weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    return (channel_last[..., :3] * weights).sum(axis=-1)
+
+
+def load_npy_grayscale(path):
+    """Loads a .npy file as single-channel float32 (H, W), auto-rescaling raw 0-255 data to [0,1]."""
+    arr = np.load(path).astype(np.float32)
+    if arr.ndim == 3:
+        arr = _to_grayscale_3d(arr)
+    elif arr.ndim != 2:
+        raise ValueError(f"{path}: unsupported array shape {arr.shape} -- expected 2D or 3D with a channel axis")
+    if arr.max() > 5.0:
+        arr = arr / 255.0
+    return arr
+
+
+def sanitize_finite(arr):
+    """Replaces NaN/Inf with the array's finite-value median (or 0.5 if none finite). Returns (clean_array, num_replaced)."""
+    bad_mask = ~np.isfinite(arr)
+    if not bad_mask.any():
+        return arr, 0
+    finite_vals = arr[~bad_mask]
+    fallback = float(np.median(finite_vals)) if finite_vals.size else 0.5
+    arr = arr.copy()
+    arr[bad_mask] = fallback
+    return arr, int(bad_mask.sum())
+
+
 def parse_args():
-    # Accepts BOTH the required positional form (python run.py <input-dir> <output-dir>) AND
-    # the --input_dir/--output_dir flag form used elsewhere in this project's other scripts --
-    # deliberately, not by oversight: the two official instruction sources for this competition
-    # disagree on which style is required, and a real test run showed this is an easy mistake to
-    # make even when you already know the right answer. Supporting both costs nothing and removes
-    # a real failure mode instead of just documenting around it.
     parser = argparse.ArgumentParser(description="KLA restoration inference.")
     parser.add_argument("input_dir_positional", nargs="?", default=None, help=argparse.SUPPRESS)
     parser.add_argument("output_dir_positional", nargs="?", default=None, help=argparse.SUPPRESS)
@@ -100,8 +133,6 @@ def chunk(lst, size):
 
 
 def run_model_oom_safe(model, batch_files, batch_tensor, device, failures):
-    """Runs the model on a batch; on CUDA out-of-memory, halves the batch and retries down to
-    single-image before giving up on that one file -- everything else still gets processed."""
     try:
         with torch.no_grad():
             output = model(batch_tensor)
@@ -121,10 +152,6 @@ def run_model_oom_safe(model, batch_files, batch_tensor, device, failures):
 
 
 def finalize_output(arr):
-    """The required output guarantee, enforced explicitly rather than assumed: single-channel
-    (H, W), clipped to [0,1], zero NaN/Inf. Even though the model's sigmoid output and the input
-    sanitization make non-finite values very unlikely in practice, this is a hard requirement per
-    the submission check, so it is checked and fixed here unconditionally, not trusted blindly."""
     if arr.ndim == 3 and arr.shape[-1] == 1:
         arr = arr[..., 0]
     arr, _ = sanitize_finite(arr)

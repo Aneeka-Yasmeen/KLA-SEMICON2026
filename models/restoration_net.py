@@ -2,19 +2,17 @@
 Severity-Gated NAF-Bottleneck restoration network.
 
 Blind restoration of grayscale images degraded by an unknown combination of additive Gaussian
-noise, multiplicative speckle noise and 2x spatial downsampling. Built from NAFNet-style gated
-conv blocks (attention-free local restoration), a cheap implicit severity embedding injected via
-FiLM at every stage (adaptive restoration strength without an explicit degradation label), and a
-single lightweight global-context block placed only at the bottleneck resolution.
+noise, multiplicative speckle noise, and 2x spatial downsampling. Built from NAFNet-style gated
+conv blocks, an implicit severity embedding injected via FiLM at every stage, and a single
+lightweight global-context block at the bottleneck resolution.
 
 References (mechanisms reproduced, not literally copied):
-  - NAFNet:   Chen et al., "Simple Baselines for Image Restoration", ECCV 2022.
+  - NAFNet:    Chen et al., "Simple Baselines for Image Restoration", ECCV 2022.
   - Restormer: Zamir et al., "Restormer: Efficient Transformer for High-Resolution Image
-               Restoration", CVPR 2022 (channel-wise attention / MDTA reproduced in
-               LightweightGlobalContext).
+               Restoration", CVPR 2022 (channel-wise attention reproduced in LightweightGlobalContext).
   - AirNet / PromptIR: implicit, continuous degradation conditioning reproduced via
                SeverityEmbedding + FiLM instead of prompt banks / cross-attention.
-  - ESPCN:    Shi et al., "Real-Time Single Image and Video Super-Resolution Using an
+  - ESPCN:     Shi et al., "Real-Time Single Image and Video Super-Resolution Using an
                Efficient Sub-Pixel CNN", CVPR 2016 (PixelShuffle + ICNR init).
 """
 
@@ -24,14 +22,7 @@ import torch.nn.functional as F
 
 
 class LayerNorm2d(nn.Module):
-    """Channel-wise LayerNorm over NCHW tensors, as used throughout NAFNet.
-
-    The mean/var reduction always runs in fp32, even under autocast(fp16) -- matching how
-    PyTorch's own nn.LayerNorm is protected under autocast. A hand-written reduction like this
-    one doesn't get that protection automatically, and skipping it is a real source of
-    instability, not a hypothetical one: see LightweightGlobalContext's docstring for an
-    empirically-confirmed fp16 failure in the same class of raw-tensor-op normalization.
-    """
+    """Channel-wise LayerNorm over NCHW tensors. Reduction runs in fp32 even under autocast(fp16)."""
 
     def __init__(self, channels, eps=1e-6):
         super().__init__()
@@ -58,7 +49,7 @@ class SimpleGate(nn.Module):
 
 
 class SimplifiedChannelAttention(nn.Module):
-    """Global-pool + 1x1 conv channel gate (NAFNet's SCA), cheaper than full squeeze-excite."""
+    """Global-pool + 1x1 conv channel gate (NAFNet's SCA)."""
 
     def __init__(self, channels):
         super().__init__()
@@ -70,11 +61,8 @@ class SimplifiedChannelAttention(nn.Module):
 
 
 class FiLM(nn.Module):
-    """
-    Feature-wise linear modulation: maps the severity embedding to a per-channel scale/shift.
-    Zero-initialized so every FiLM layer starts as an identity transform and the network has to
-    earn any deviation from it during training (stabilizes early optimization).
-    """
+    """Feature-wise linear modulation: maps the severity embedding to a per-channel scale/shift.
+    Zero-initialized so it starts as an identity transform."""
 
     def __init__(self, embed_dim, channels):
         super().__init__()
@@ -90,16 +78,8 @@ class FiLM(nn.Module):
 
 
 class SeverityGate(nn.Module):
-    """
-    Predicts a per-channel residual-branch scale from the severity embedding, in place of a
-    static learned constant -- so how strongly a block's residual correction contributes can
-    depend on estimated degradation severity, not just be fixed at training time. Zero-initialized
-    like FiLM, so a model built with this enabled starts identical to the static-beta/gamma
-    baseline and must earn any severity-dependent deviation during training. This changes what
-    beta/gamma respond to, not the compute graph shape -- still one static forward pass per
-    image, fully batchable, no discrete branching (see the design advisory's reasoning against
-    hard dynamic depth for why that property matters for the KLA throughput benchmark).
-    """
+    """Predicts a per-channel residual-branch scale from the severity embedding, in place of a
+    static learned constant. Zero-initialized, so it starts identical to the static-beta/gamma case."""
 
     def __init__(self, embed_dim, channels):
         super().__init__()
@@ -115,13 +95,11 @@ class NAFBlock(nn.Module):
     """
     NAFNet-style block: LayerNorm -> 1x1 expand -> depthwise 3x3 -> SimpleGate -> channel
     attention -> 1x1 project (residual), followed by a LayerNorm -> 1x1 expand -> SimpleGate ->
-    1x1 project feed-forward (residual). If an embed_dim is given, a FiLM layer conditioned on
-    the severity embedding is applied after the block, so restoration strength adapts to the
-    estimated degradation severity at every depth, not just once.
+    1x1 project feed-forward (residual). If embed_dim is given, a FiLM layer conditioned on the
+    severity embedding is applied after the block.
 
-    severity_gated_residuals (default False, an ablation candidate -- see configs/ablation/):
-    when true, the residual-branch scales (beta/gamma) are predicted from the severity embedding
-    via SeverityGate instead of being static learned constants.
+    severity_gated_residuals: when true, the residual-branch scales (beta/gamma) are predicted
+    from the severity embedding via SeverityGate instead of being static learned constants.
     """
 
     def __init__(self, channels, expand_ratio=2, ffn_expand_ratio=2, embed_dim=None, severity_gated_residuals=False):
@@ -174,12 +152,8 @@ class NAFBlock(nn.Module):
 
 
 class SeverityEmbedding(nn.Module):
-    """
-    Cheap implicit degradation-severity estimator: global-average-pools the stem features, then
-    a small MLP produces a compact embedding consumed by FiLM throughout the network. No explicit
-    degradation label or type is ever provided as input -- the network infers a continuous,
-    content-derived signal instead of a discrete classification.
-    """
+    """Global-average-pools the stem features, then an MLP produces a compact embedding consumed
+    by FiLM throughout the network. No explicit degradation label is ever provided as input."""
 
     def __init__(self, in_channels, embed_dim, hidden_dim=None):
         super().__init__()
@@ -198,19 +172,13 @@ class SeverityEmbedding(nn.Module):
 
 class LightweightGlobalContext(nn.Module):
     """
-    The network's only attention op, placed exclusively at the bottleneck resolution (the
-    cheapest place to pay for it). Reproduces Restormer's MDTA idea: attention computed across
-    the channel dimension instead of spatial tokens, so cost is O(C^2) rather than O((HW)^2) --
-    this is what makes a single global-context block affordable here without adding a
-    Mamba/SSM-style dependency or full spatial self-attention.
+    The network's only attention op, placed at the bottleneck resolution. Reproduces Restormer's
+    MDTA idea: attention computed across the channel dimension instead of spatial tokens, so cost
+    is O(C^2) rather than O((HW)^2).
 
-    Empirically confirmed fp16 failure mode (see diag_nan.py): F.normalize's default eps
-    (1e-12) underflows to 0 in fp16, so any channel-vector whose norm gets small -- which
-    happens routinely on the large flat/uniform background regions typical of semiconductor
-    images, not just as an edge case -- produces exploding gradients through that division's
-    backward pass under autocast. The q/k normalize + attention matmul below is therefore
-    forced to run in fp32 regardless of the surrounding autocast context, mirroring how
-    PyTorch's own attention/softmax ops are protected under autocast automatically.
+    The q/k normalize + attention matmul runs in fp32 regardless of the surrounding autocast
+    context -- F.normalize's default eps underflows to 0 in fp16 on flat/uniform regions, which
+    otherwise produces exploding gradients through that division's backward pass.
     """
 
     def __init__(self, channels, num_heads=4):
@@ -246,11 +214,8 @@ class LightweightGlobalContext(nn.Module):
 
 
 def icnr_init(conv_weight, scale=2):
-    """
-    ICNR initialization (Aitken et al., 2017) for sub-pixel-convolution weights: initializes each
-    of the scale^2 channel groups that PixelShuffle will interleave to the *same* kernel, which
-    removes the checkerboard-pattern bias PixelShuffle otherwise starts training with.
-    """
+    """ICNR initialization (Aitken et al., 2017) for sub-pixel-convolution weights -- removes the
+    checkerboard-pattern bias PixelShuffle otherwise starts training with."""
     out_channels, in_channels, kh, kw = conv_weight.shape
     sub_channels = out_channels // (scale ** 2)
     sub_kernel = torch.empty(sub_channels, in_channels, kh, kw)
@@ -284,19 +249,14 @@ class RestorationNet(nn.Module):
         -> strided downsample (input resolution -> bottleneck resolution)
         -> bottleneck (NAFBlocks, FiLM-modulated) + one global-context block
         -> stage-1 PixelShuffle upsample (bottleneck resolution -> input resolution),
-           fused with the encoder skip connection to recover detail lost to the internal
-           downsample
+           fused with the encoder skip connection
         -> decoder (NAFBlocks, FiLM-modulated) at input resolution
-        -> stage-2 PixelShuffle upsample (input resolution -> 2x input resolution): this is the
-           officially required super-resolution step, distinct from the internal downsample above
+        -> stage-2 PixelShuffle upsample (input resolution -> 2x input resolution): the required
+           super-resolution step
         -> refinement conv -> sigmoid
 
-    The sigmoid output lands directly in [0,1], matching the ground-truth convention specified by
-    the competition, so no per-image output denormalization is needed. Only the *input* is
-    clamped to a configurable robust range (input_clip_range) to absorb the intentionally
-    out-of-range NoisyLR values without distorting the relative noise-amplitude cues the severity
-    embedding relies on (a fixed clamp is used instead of per-image percentile rescaling, which
-    would erase exactly that signal -- see project notes for the reasoning).
+    The sigmoid output lands directly in [0,1]. Only the input is clamped to a configurable
+    robust range (input_clip_range) to absorb out-of-range NoisyLR values.
     """
 
     def __init__(
@@ -380,12 +340,8 @@ class RestorationNet(nn.Module):
     def forward(self, x):
         x = torch.clamp(x, *self.input_clip_range)
 
-        # The single internal stride-2 downsample requires even H/W so upsample_to_input_res's
-        # output matches the encoder skip connection exactly. Real input isn't guaranteed to be
-        # even-sized -- this network is not restricted to the official 128x128 KLA files, so an
-        # arbitrary single image (odd dimensions, any resolution) must not crash here. Pad up to
-        # the nearest even size with edge-replicated pixels, run the network, then crop the
-        # output back down to exactly scale_factor times the *original* (unpadded) input size.
+        # Pad to even H/W so upsample_to_input_res's output matches the encoder skip exactly,
+        # then crop back to scale_factor times the original input size.
         _, _, h, w = x.shape
         pad_h, pad_w = h % 2, w % 2
         if pad_h or pad_w:
@@ -419,9 +375,8 @@ class RestorationNet(nn.Module):
 
 
 def build_model_from_config(config: dict) -> RestorationNet:
-    """Builds RestorationNet from a plain dict (either a full experiment config with a 'model'
-    key, or a model-only dict) so checkpoints and configs stay self-describing across
-    train.py/inference.py without either script hardcoding architecture hyperparameters."""
+    """Builds RestorationNet from a plain dict (a full experiment config with a 'model' key, or a
+    model-only dict), so checkpoints stay self-describing."""
     model_cfg = config.get("model", config)
     return RestorationNet(
         in_channels=model_cfg.get("in_channels", 1),
