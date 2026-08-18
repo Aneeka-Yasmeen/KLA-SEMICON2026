@@ -1,4 +1,4 @@
-# Severity-Gated NAFRestore
+# Severity-Gated NAFRestore - Team Sakura
 
 Blind restoration of grayscale images degraded by Gaussian noise, speckle noise, and 2x
 downsampling (unknown combination/order), for the KLA / SEMICON India Hackathon 2026 problem
