@@ -1,0 +1,11 @@
+# Exact versions tested against. run.py needs only these two packages -- no Pillow (this
+# package is .npy-only, per the submission requirements), no lpips/thop/matplotlib/tqdm (those
+# are training/evaluation-only tools, not used anywhere in the run.py inference path).
+numpy==2.5.2
+torch==2.13.0
+
+# torch above is the base version tested against. Install the CUDA build matching the target
+# machine's GPU driver from https://pytorch.org/get-started/locally/ if the default
+# `pip install torch` does not pick up GPU support (e.g. `pip install torch==2.13.0
+# --index-url https://download.pytorch.org/whl/cu126` for CUDA 12.6). CPU-only also works, just
+# slower -- run.py auto-detects and falls back automatically, no configuration needed.
