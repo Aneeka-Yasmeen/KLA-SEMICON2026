@@ -16,15 +16,11 @@ python -m venv .venv
 .venv\Scripts\activate              # Linux/Mac: source .venv/bin/activate
 pip install -r requirements.txt
 
-pip uninstall torch -y
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126
-
-python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-
 python run.py <input-dir> <output-dir>
 ```
 
-See **Setup** and **GPU detection** below for details on the CUDA install step.
+`requirements.txt` pulls the CUDA build of PyTorch directly (`torch==2.13.0+cu126`) -- no
+separate install step. See **Setup** and **GPU detection** below for details.
 
 ## Structure
 
@@ -47,27 +43,25 @@ pip install -r requirements.txt
 ```
 
 No internet access is needed at run time -- the model weights ship in `models/final_model.pth`.
-No API keys, downloads, or manual configuration.
+No API keys, downloads, or manual configuration. Internet access is needed once, at install time,
+to fetch the CUDA build of PyTorch.
 
-**GPU users read this first.** `pip install -r requirements.txt` installs the CPU-only build of
-PyTorch by default -- the CUDA build comes from a separate package index. `run.py` still runs
-correctly on CPU (it falls back automatically and prints a warning), but a machine with a GPU
-will otherwise get scored on CPU throughput. To get the GPU build:
+`requirements.txt` installs `torch==2.13.0+cu126` directly, via an `--extra-index-url` pointing
+at PyTorch's own package index alongside PyPI. No separate reinstall step is needed on a machine
+with an NVIDIA GPU and driver already installed. CUDA 12.6 supports H100 (Hopper) as well as
+older GPU generations.
 
-```bash
-pip uninstall torch -y
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126
-```
-
-Replace `cu126` with whatever matches the target machine's CUDA version -- see
-https://pytorch.org/get-started/locally/ for the right index URL. CUDA 12.6 supports H100
-(Hopper) as well as older GPU generations.
+If the target machine's driver doesn't support CUDA 12.6, edit the `--extra-index-url` line in
+`requirements.txt` to match -- see https://pytorch.org/get-started/locally/ for the right index
+URL. `run.py` still runs on CPU as a fallback if no compatible build is found (prints a warning),
+but every environment this is meant to run on has an NVIDIA GPU, so the CUDA build is the
+default, not an opt-in step.
 
 Verify it worked:
 ```bash
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
-This should print `True` before running `run.py` if a GPU is expected.
+This should print `True`.
 
 ## GPU detection
 
@@ -77,8 +71,7 @@ found and uses it:
 ```
 [run] device=cuda (NVIDIA GeForce RTX 4060 Laptop GPU)
 ```
-No flag or code change is needed to select the GPU. The only manual step is the CUDA-build
-install above, which applies to any PyTorch project, not just this one.
+No flag or code change is needed to select the GPU.
 
 ## Run
 
