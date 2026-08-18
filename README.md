@@ -1,8 +1,11 @@
-# KLA Restoration -- Submission Package
+# Severity-Gated NAFRestore
 
 Blind restoration of grayscale images degraded by Gaussian noise, speckle noise, and 2x
 downsampling (unknown combination/order), for the KLA / SEMICON India Hackathon 2026 problem
 statement.
+
+Our uses a Severity-Gated NAF-Bottleneck architecture — NAFNet-style gated convolution blocks conditioned on an implicit, learned severity embedding (no degradation label ever given), a single lightweight channel-attention block at the bottleneck, and dual-stage PixelShuffle upsampling for the required 2x super-resolution. The final model (3.01M parameters) reaches 28.83 dB PSNR / 0.787 SSIM / 0.229 LPIPS on a held-out validation split, arrived at through staged, ablation-tested design decisions rather than a single guess, and ships as a self-contained, fault-tolerant run.py that runs on CPU or GPU.
+
 
 Single `run.py` entry point, `.npy`-only input/output, no internet access or manual configuration.
 
